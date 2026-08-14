@@ -1,0 +1,86 @@
+# ClusterServingRuntime — ini objek yang di GUI platform produksi muncul sebagai "dropdown runtime"
+# saat deploy model (lihat docs/00-mapping.md, lapisan serving). Cluster-scoped, jadi
+# satu definisi dipakai site-a dan site-b: runtime-nya benar-benar identik, bukan mirip.
+#
+# KENAPA llama.cpp DAN BUKAN vLLM SEPERTI PRODUKSI — ini penyimpangan sadar:
+#   Image kserve/huggingfaceserver:v0.18.1 (yang membawa vLLM) = 4 GB terkompresi dan
+#   butuh beberapa GB RAM cuma untuk memuat torch. Host lab punya <2 GB bebas.
+#   llama.cpp memberi permukaan API yang SAMA — /v1/chat/completions dan /v1/models,
+#   OpenAI-compatible — dengan 37 MiB RSS per pod (model di-mmap, jadi bobotnya masuk
+#   page cache, bukan anonymous memory).
+#   Yang diuji sprint ini adalah BENTUK JALUR request, bukan performa mesin inferensi.
+#   Begitu ada GPU sungguhan: ganti image + args di file ini, InferenceService di
+#   serving/sites/ tidak perlu disentuh sama sekali. Itu gunanya runtime dipisah.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: llamacpp-openai
+  annotations:
+    lab.internal/catatan: "Pengganti ringan untuk vLLM. Lihat komentar di atas sebelum menyalin ke produksi."
+spec:
+  supportedModelFormats:
+    - name: gguf
+      autoSelect: true
+      priority: 1
+  protocolVersions:
+    - v1
+  containers:
+    # Nama 'kserve-container' wajib — KServe mencari container dengan nama ini untuk
+    # menyuntikkan volume /mnt/models dari storage-initializer.
+    - name: kserve-container
+      # Tag :server bergulir (build baru menimpa tag lama), jadi dipin ke digest.
+      # Diverifikasi 2026-08-14. Tag berversi 'server-b<build>' berhenti terbit di
+      # sekitar b5350 — jangan cari 'server-b10423', tidak ada.
+      image: ghcr.io/ggml-org/llama.cpp:server@sha256:2b87bde1575df56f282a6b691106d1d3c5efb6c1b7673568a286cc1331b1ef8c
+      command: ["/bin/sh", "-c"]
+      args:
+        # 'set --' dipakai supaya glob diperluas shell tanpa command substitution.
+        # Hindari $(...) di sini: Kubernetes punya sintaks ekspansi $(VAR) sendiri di
+        # field args, dan dua mekanisme yang mirip di satu baris adalah jebakan.
+        - |
+          set -e
+          set -- /mnt/models/*.gguf
+          echo ">> memuat $1 sebagai '${MODEL_ALIAS:-model}'"
+          exec /app/llama-server \
+            --model "$1" \
+            --alias "${MODEL_ALIAS:-model}" \
+            --host 0.0.0.0 \
+            --port 8080 \
+            --ctx-size 512 \
+            --threads 2 \
+            --no-webui
+      env:
+        # Bikin /v1/models melaporkan nama InferenceService ('llama-sim' / 'deepseek-sim')
+        # dan bukan path file GGUF. Dua endpoint jadi benar-benar terbedakan dari sisi
+        # client, persis seperti dua model berbeda di produksi.
+        - name: MODEL_ALIAS
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['serving.kserve.io/inferenceservice']
+      ports:
+        - containerPort: 8080
+          name: http1
+          protocol: TCP
+      # Probe ditulis eksplisit supaya KServe tidak memasang probe bawaannya:
+      # default protokol v1 memanggil /v1/models/<nama>, endpoint yang tidak disediakan
+      # llama.cpp. /health adalah milik llama.cpp sendiri.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 30
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 20
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi

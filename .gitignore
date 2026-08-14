@@ -1,0 +1,7 @@
+kubeconfig
+*.kubeconfig
+airgap/bundle/
+capacity/benchmarks/*.raw
+.DS_Store
+*.tgz
+charts/*/charts/

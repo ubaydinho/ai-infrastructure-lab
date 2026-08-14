@@ -1,0 +1,19 @@
+# Dipakai hanya di mode air-gap (Sprint 4).
+# Semua pull dialihkan ke registry lokal yang sudah dihydrate oleh airgap/hydrate.sh.
+mirrors:
+  docker.io:
+    endpoint:
+      - http://registry.localhost:5000
+  ghcr.io:
+    endpoint:
+      - http://registry.localhost:5000
+  gcr.io:
+    endpoint:
+      - http://registry.localhost:5000
+  quay.io:
+    endpoint:
+      - http://registry.localhost:5000
+configs:
+  "registry.localhost:5000":
+    tls:
+      insecure_skip_verify: true

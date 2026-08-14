@@ -1,0 +1,12 @@
+apiVersion: v2
+name: tenant-bootstrap
+description: >-
+  Bootstrap satu tenant multi-tenancy lengkap dalam satu perintah — Namespace,
+  ResourceQuota, LimitRange, RBAC (ServiceAccount/Role/RoleBinding), dan
+  NetworkPolicy. Konversi Helm dari latihan/tenancy/ (lihat README chart ini).
+type: application
+version: 0.1.0
+appVersion: "1.0"
+keywords:
+  - multi-tenancy
+  - substrate-lab

@@ -1,0 +1,79 @@
+# site-a — satu dari dua site active-active.
+#
+# serving/sites/site-b.yaml WAJIB identik dengan file ini kecuali namespace. Kalau
+# kamu mengubah sesuatu di sini, ubah juga di sana; kalau suatu saat keduanya memang
+# harus berbeda, itu tandanya sudah waktunya jadi Helm chart, bukan waktunya
+# membiarkan dua file diam-diam menyimpang.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: site-a
+  labels:
+    lab.internal/site: site-a
+    lab.internal/peran: serving
+---
+# llama-sim — mewakili model Llama di produksi.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama-sim
+  namespace: site-a
+  annotations:
+    # Eksplisit walau controller sudah default RawDeployment. Annotation ini yang
+    # dibaca orang saat debugging jam 2 pagi; jangan paksa mereka menebak dari ConfigMap.
+    serving.kserve.io/deploymentMode: RawDeployment
+    # Produksi: pod fixed, tanpa autoscaling. 'none' mencegah KServe membuat HPA —
+    # yang di cluster ini juga tidak akan berfungsi karena metrics-server dimatikan.
+    serving.kserve.io/autoscalerClass: none
+spec:
+  predictor:
+    minReplicas: 1
+    # Pod model TIDAK boleh mendarat di fake node KWOK — di sana pod akan tampak
+    # Running padahal tidak melayani apa pun. Yang melindungi kita adalah taint
+    # kwok.x-k8s.io/node=fake:NoSchedule di node itu dan tidak adanya toleration
+    # di sini. Jangan tambahkan toleration ke pod model.
+    model:
+      modelFormat:
+        name: gguf
+      runtime: llamacpp-openai
+      # storage-initializer KServe menerima URL https langsung dan menyimpan file apa
+      # adanya ke /mnt/models (diverifikasi 2026-08-14: 145 MB, ~43 detik).
+      # Model 135M dipilih supaya 4 pod muat di laptop; README menyebut opt-125m —
+      # kelas yang sama, tapi SmolLM2 sudah instruction-tuned dan punya chat template,
+      # jadi /v1/chat/completions memberi jawaban yang bisa dibaca manusia.
+      storageUri: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi
+---
+# deepseek-sim — mewakili model DeepSeek di produksi. Bobot modelnya sama persis
+# dengan llama-sim; yang disimulasikan adalah DUA ENDPOINT TERPISAH di satu site,
+# bukan dua arsitektur model yang berbeda.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: deepseek-sim
+  namespace: site-a
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/autoscalerClass: none
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: gguf
+      runtime: llamacpp-openai
+      storageUri: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi

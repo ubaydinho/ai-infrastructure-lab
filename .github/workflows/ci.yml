@@ -1,0 +1,45 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  static:
+    name: validasi tanpa cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: helm
+        uses: azure/setup-helm@v4
+
+      - name: helm lint
+        run: |
+          # charts/_archive/ ikut dilint — chart yang diarsipkan tetap harus valid,
+          # kalau tidak dia membusuk diam-diam sampai ada yang butuh lagi.
+          for c in charts/*/ charts/_archive/*/; do
+            if [ -f "$c/Chart.yaml" ]; then helm lint "$c"; fi
+          done
+
+      - name: pasang kubeconform
+        run: |
+          curl -sSL -o /tmp/kc.tar.gz \
+            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kc.tar.gz -C /usr/local/bin kubeconform
+
+      - name: validasi skema manifest
+        run: |
+          # Yang dikecualikan cuma file yang memang bukan manifest Kubernetes:
+          # values Helm dan registries.yaml (config containerd). Node KWOK palsu
+          # tidak dikecualikan — lihat catatan di target test-schema Makefile.
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -ignore-filename-pattern 'values.*\.yaml' \
+            -ignore-filename-pattern 'registries\.yaml' \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            cluster/ sim/ serving/
+
+  # Aktif mulai Sprint 4 — alert rule yang punya unit test.
+  # rules:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: promtool test rules observability/tests/*.yaml

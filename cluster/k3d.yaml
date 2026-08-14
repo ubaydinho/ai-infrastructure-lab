@@ -1,0 +1,38 @@
+# k3d config — meniru bentuk satu unit platform produksi ukuran Medium: 1 control + 2 worker.
+#
+# Traefik SENGAJA dibiarkan hidup — dia IngressClass yang dipakai InferenceService
+# (KServe RawDeployment). Dulu dimatikan waktu rencananya pakai Kourier/Knative;
+# jangan matikan lagi tanpa menyiapkan ingress pengganti, atau langkah serving mati.
+#
+# metrics-server tetap dimatikan: setiap 100 MB berharga, dan lab ini menjalankan
+# pod fixed tanpa HPA — sama seperti profil produksi.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: lab
+servers: 1
+agents: 2
+image: rancher/k3s:v1.31.5-k3s1
+registries:
+  create:
+    name: registry.localhost
+    host: "0.0.0.0"
+    hostPort: "5000"
+  # Untuk mode air-gap, isi cluster/registries.yaml lalu aktifkan baris ini:
+  # config: cluster/registries.yaml
+ports:
+  - port: 8080:80
+    nodeFilters: [loadbalancer]
+  - port: 8443:443
+    nodeFilters: [loadbalancer]
+options:
+  k3d:
+    wait: true
+    timeout: 180s
+  k3s:
+    extraArgs:
+      - arg: --disable=metrics-server
+        nodeFilters: [server:*]
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

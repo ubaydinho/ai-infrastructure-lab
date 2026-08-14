@@ -1,0 +1,38 @@
+# Values KServe untuk lab v2. Satu keputusan yang benar-benar penting di file ini:
+# deploymentMode. Default chart adalah 'Knative' — kita menimpanya.
+#
+# Kenapa RawDeployment:
+#   1. Dokumentasi KServe sendiri menyarankan Standard/RawDeployment untuk generative
+#      inference — beban panjang, GPU mahal, scale-to-zero justru kontraproduktif.
+#   2. Produksi yang ditiru lab ini memang pod fixed tanpa autoscaling.
+#   3. Knative + Istio penuh tidak muat di laptop 8 GB.
+# API InferenceService-nya identik; yang berbeda cuma execution mode. Objek yang lahir
+# jadi Deployment/Service/Ingress biasa, bukan Configuration/Revision/Route Knative.
+#
+# Dipasang lewat: make kserve
+#   helm upgrade --install kserve oci://ghcr.io/kserve/charts/kserve-resources \
+#     --version v0.18.1 -n kserve -f serving/kserve/values-rawdeployment.yaml
+kserve:
+  controller:
+    deploymentMode: RawDeployment
+
+    gateway:
+      # Di RawDeployment, KServe membuat Ingress biasa. className harus cocok dengan
+      # IngressClass yang hidup di cluster (lihat: kubectl get ingressclass).
+      # Kalau produksi ternyata Istio, ganti satu baris ini jadi 'istio' — bukan re-design.
+      ingressGateway:
+        className: traefik
+        # Gateway API belum dipakai: Traefik bawaan k3d melayani Ingress v1 apa adanya,
+        # dan menambah CRD Gateway API cuma menambah bagian yang bisa rusak.
+        enableGatewayApi: false
+
+      # Tanpa ini KServe tetap mencoba merekonsiliasi VirtualService Istio dan
+      # menerbitkan "Warning VirtualServiceCRDNotFound" tiap reconcile. Di cluster tanpa
+      # Istio itu event palsu yang akan mengotori alert Sprint 3 — matikan sekarang,
+      # jangan biarkan orang belajar mengabaikan warning.
+      disableIstioVirtualHost: true
+
+      # Host Ingress jadi <isvc>-<namespace>.example.com. Domain palsu ini disengaja:
+      # lab mengakses endpoint lewat header Host, jadi tidak bergantung DNS sama sekali —
+      # perilaku yang sama nanti waktu mode air-gap.
+      domain: example.com

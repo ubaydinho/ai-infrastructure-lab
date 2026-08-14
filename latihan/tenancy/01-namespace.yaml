@@ -1,0 +1,10 @@
+# Namespace = folder logis di dalam cluster.
+# Nama objek unik PER NAMESPACE, bukan per cluster. Jadi boleh ada
+# pod bernama 'batch-1' di default DAN di tenant-a sekaligus.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-a
+  labels:
+    tenant: tenant-a
+    tier: small

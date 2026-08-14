@@ -1,0 +1,61 @@
+# Worker GPU palsu. Tidak ada kubelet, tidak ada container, tidak ada memori terpakai.
+# Scheduler Kubernetes tidak bisa membedakan nvidia.com/gpu ini dari yang asli —
+# itulah seluruh trik lab ini.
+#
+# CATATAN: status pada Node hanya diterima saat CREATE. Kalau kamu mengubah
+# jumlah GPU di file ini, 'kubectl apply' TIDAK akan mengubahnya.
+# Hapus dulu: kubectl delete node gpu-worker-01
+apiVersion: v1
+kind: Node
+metadata:
+  name: gpu-worker-01
+  annotations:
+    kwok.x-k8s.io/node: fake
+    node.alpha.kubernetes.io/ttl: "0"
+  labels:
+    type: kwok
+    kubernetes.io/hostname: gpu-worker-01
+    kubernetes.io/os: linux
+    kubernetes.io/arch: amd64
+    node-role.lab.internal/gpu-worker: "true"
+    nvidia.com/gpu.product: NVIDIA-H200
+    nvidia.com/gpu.memory: "143771"
+spec:
+  taints:
+    # Pagar pengaman: tanpa toleration yang cocok, pod sungguhan tidak akan
+    # pernah mendarat di node hantu ini. Menulis toleration yang benar
+    # adalah latihan taint/toleration Fase 1 — dan tidak bisa dilewati.
+    - key: kwok.x-k8s.io/node
+      value: fake
+      effect: NoSchedule
+status:
+  phase: Running
+  nodeInfo:
+    architecture: amd64
+    operatingSystem: linux
+    kubeletVersion: fake
+    # Tujuh field di bawah tidak dibaca KWOK maupun scheduler, tapi skema Node
+    # mewajibkannya. Diisi nilai yang jelas palsu supaya 'make test-schema' bisa
+    # tetap -strict — tujuh baris ini lebih murah daripada satu pengecualian di
+    # validator, yang akan menyembunyikan kesalahan sungguhan nanti.
+    machineID: fake-gpu-worker-01
+    systemUUID: fake-gpu-worker-01
+    bootID: fake-gpu-worker-01
+    kernelVersion: fake
+    osImage: fake
+    containerRuntimeVersion: fake
+    kubeProxyVersion: fake
+  capacity:
+    cpu: "224"
+    memory: 2Ti
+    pods: "110"
+    nvidia.com/gpu: "4"
+  allocatable:
+    cpu: "224"
+    memory: 2Ti
+    pods: "110"
+    nvidia.com/gpu: "4"
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: KubeletReady

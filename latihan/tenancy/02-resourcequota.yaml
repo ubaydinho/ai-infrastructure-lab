@@ -1,0 +1,18 @@
+# ResourceQuota = batas atas TOTAL yang boleh diminta seluruh pod
+# di dalam satu namespace. Bukan jaminan, cuma plafon permintaan.
+#
+# Perhatikan awalan 'requests.' pada GPU: untuk extended resource,
+# hanya key berawalan 'requests.' yang diterima.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: quota-tenant-a
+  namespace: tenant-a
+spec:
+  hard:
+    requests.nvidia.com/gpu: "1"      # tier small = 1 GPU
+    requests.cpu: "32"
+    requests.memory: 128Gi
+    limits.cpu: "64"
+    limits.memory: 256Gi
+    pods: "30"

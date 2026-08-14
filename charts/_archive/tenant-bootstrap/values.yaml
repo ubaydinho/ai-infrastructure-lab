@@ -1,0 +1,53 @@
+# Nilai default. Override lewat --set atau -f values-<tenant>.yaml saat install.
+tenant:
+  name: tenant-a
+  tier: small          # small | medium | dedicated — harus salah satu key di 'tiers' bawah
+
+# Tier menentukan requests/limits/GPU/jumlah pod. Ubah di sini, bukan di template —
+# angka lepas di dalam template adalah bau busuk yang sama seperti hardcode di kode aplikasi.
+tiers:
+  small:
+    gpu: 1
+    requestsCpu: "16"
+    requestsMemory: 64Gi
+    limitsCpu: "32"
+    limitsMemory: 128Gi
+    pods: 30
+  medium:
+    gpu: 2
+    requestsCpu: "64"
+    requestsMemory: 256Gi
+    limitsCpu: "96"
+    limitsMemory: 384Gi
+    pods: 60
+  dedicated:
+    gpu: 4
+    requestsCpu: "224"
+    requestsMemory: 2Ti
+    limitsCpu: "224"
+    limitsMemory: 2Ti
+    pods: 110
+
+# LimitRange sama untuk semua tier — ini pagar per-container, bukan pagar per-tenant.
+# Angka defaultRequest inilah yang mengisi pod yang lupa menulis 'resources', persis
+# yang kamu buktikan di Sesi 3 latihan/tenancy.
+limits:
+  defaultRequestCpu: 500m
+  defaultRequestMemory: 1Gi
+  defaultCpu: "1"
+  defaultMemory: 2Gi
+  minCpu: 100m
+  minMemory: 128Mi
+  maxCpu: "16"
+  maxMemory: 64Gi
+
+# RBAC viewer: bisa lihat pod/log/service/quota, TIDAK bisa delete.
+# Ubah verbs di sini kalau tenant butuh membatalkan job miliknya sendiri —
+# ini keputusan platform yang sudah kamu tandai perlu diputuskan di Sesi 4.
+rbac:
+  verbs: [get, list, watch]
+
+networkPolicy:
+  enabled: true
+  # Namespace tempat CoreDNS hidup — biasanya tidak perlu diubah.
+  dnsNamespace: kube-system

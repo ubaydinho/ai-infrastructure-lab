@@ -1,0 +1,32 @@
+# Default Kubernetes: SEMUA pod boleh menghubungi semua pod, lintas namespace.
+# NetworkPolicy mengubahnya jadi daftar putih.
+#
+# CATATAN: ini TIDAK berlaku pada pod palsu di node KWOK — tidak ada
+# jaringan nyata di sana. Latihan ini butuh pod sungguhan.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tenant-a
+spec:
+  podSelector: {}                     # {} = SEMUA pod di namespace ini
+  policyTypes: [Ingress, Egress]      # tanpa aturan izin = tolak semua
+---
+# Tanpa blok di bawah ini, DNS mati dan semuanya rusak dengan cara
+# yang membingungkan. Ini kesalahan nomor satu saat pertama pakai NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: tenant-a
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

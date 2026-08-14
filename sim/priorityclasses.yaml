@@ -1,0 +1,21 @@
+# Replikasi logika idle reclaim dari deck: 8000 versus 10000.
+# PriorityClass itu objek GLOBAL, bukan per namespace — konsekuensinya,
+# tenant mana pun bisa memakainya kecuali kamu batasi lewat RBAC atau
+# ResourceQuota dengan scopeSelector PriorityClass. Itu latihan Sprint 1.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lab-batch
+value: 8000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Beban batch dan eksperimen. Kandidat pertama untuk direbut."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: lab-interactive
+value: 10000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Endpoint inference yang dilihat pengguna. Merebut slot batch saat cluster penuh."

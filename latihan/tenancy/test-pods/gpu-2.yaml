@@ -1,0 +1,17 @@
+# Pod palsu 1 GPU di tenant-a. Untuk menguji ResourceQuota.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-2
+  namespace: tenant-a
+  labels: { sim: "true" }
+spec:
+  nodeSelector: { type: kwok }
+  tolerations:
+    - { key: kwok.x-k8s.io/node, operator: Equal, value: fake, effect: NoSchedule }
+  containers:
+    - name: trainer
+      image: fake-image:latest
+      resources:
+        requests: { cpu: "8", memory: 32Gi, nvidia.com/gpu: "1" }
+        limits:   { cpu: "8", memory: 32Gi, nvidia.com/gpu: "1" }

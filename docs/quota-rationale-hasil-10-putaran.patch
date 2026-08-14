@@ -1,0 +1,85 @@
+diff --git a/docs/10-quota-rationale.md b/docs/10-quota-rationale.md
+index 80065e5..e5c2437 100644
+--- a/docs/10-quota-rationale.md
++++ b/docs/10-quota-rationale.md
+@@ -57,16 +57,52 @@ Sekarang cocokkan dengan kasus ini: semua pod batch prioritasnya **sama** (8000)
+ 
+ Artinya kriteria 1 sampai 4 **seri semua.** Keputusan turun ke kriteria 5, dan bahkan di sana selisihnya cuma pecahan detik karena batch-2 sampai batch-8 dibuat dalam satu loop.
+ 
+-**Kesimpulan sementara: pemilihan `gpu-worker-01` kemungkinan besar hasil tiebreak, bukan keputusan bermakna.**
++**Kesimpulan: ada dua lapisan keputusan, dan hanya satu yang acak.**
+ 
+-> **Ini masih hipotesis, belum terbukti.** Cara mengujinya: ulangi eksperimen 5–10 kali dari kondisi bersih dan catat node mana yang jadi korban setiap kali.
+->
+-> - Kalau node-nya **berganti-ganti** → benar tiebreak, tidak deterministik.
+-> - Kalau **selalu `gpu-worker-01`** → ada sebab sistematis yang belum aku temukan, dan penjelasan di atas salah.
+->
+-> Belum aku jalankan. Hasilnya masuk ke bagian ini.
++### Hasil 10 putaran
+ 
+-Kenapa batch-5 dan batch-8, bukan batch-2 dan batch-3? Di dalam satu node, scheduler mengurutkan kandidat dari yang "paling tidak penting" — prioritas sama, jadi pembedanya waktu start, dan yang lebih baru dianggap kurang penting. batch-5 dan batch-8 dibuat setelah batch-2 dan batch-3. Konsisten dengan yang teramati, tapi perlu dikonfirmasi dengan ulangan di atas.
++Dijalankan dengan `sim/scenarios/02-preemption-8000-vs-10000.sh 10`. Beda dari eksperimen pertama: kedelapan pod batch dibuat bersamaan, jadi umurnya seragam.
++
++| Putaran | Node pemenang | Korban |
++|---|---|---|
++| 1 | gpu-worker-02 | batch-6, batch-7 |
++| 2 | gpu-worker-02 | batch-6, batch-8 |
++| 3 | gpu-worker-02 | batch-5, batch-7 |
++| 4 | gpu-worker-01 | batch-5, batch-8 |
++| 5 | gpu-worker-01 | batch-6, batch-7 |
++| 6 | gpu-worker-02 | batch-6, batch-8 |
++| 7 | gpu-worker-01 | batch-5, batch-8 |
++| 8 | gpu-worker-01 | batch-5, batch-8 |
++| 9 | gpu-worker-01 | batch-6, batch-8 |
++| 10 | gpu-worker-02 | batch-6, batch-7 |
++
++### Temuan 1 — pemilihan node: acak
++
++`gpu-worker-01` 5 kali, `gpu-worker-02` 5 kali. Terbagi persis rata.
++
++**Hipotesis awal terbukti.** Karena kriteria 1 sampai 4 seri semua — prioritas sama, request sama, tidak ada PDB, kedua node penuh 4/4 — tidak ada dasar bermakna untuk memilih node. Hasilnya tiebreak yang tidak bisa diprediksi dari luar.
++
++### Temuan 2 — pemilihan korban di dalam node: deterministik penuh
++
++Ini yang tidak aku duga, dan lebih penting dari Temuan 1.
++
++Frekuensi jadi korban dari 20 total:
++
++| Pod | Jadi korban |
++|---|---|
++| batch-1, batch-2, batch-3, batch-4 | **0 kali** |
++| batch-5 | 4 kali |
++| batch-6 | 6 kali |
++| batch-7 | 4 kali |
++| batch-8 | 6 kali |
++
++**Empat pod tertua tidak pernah tersentuh, sekali pun.** Yang mati selalu dua pod terbaru di node yang terpilih. Jadi aturan "yang lebih baru dianggap kurang penting" bukan sekadar tiebreak terakhir — di dalam satu node itu deterministik dan absolut.
++
++Pola pendukungnya: korban selalu satu dari {batch-5, batch-6} dan satu dari {batch-7, batch-8}, tidak pernah keduanya dari pasangan yang sama. Itu karena scheduler menyebar pod berurutan secara bergantian antar node, jadi batch-5 dan batch-6 selalu mendarat di node berbeda, begitu pula batch-7 dan batch-8. Dua pod terbaru di node mana pun otomatis satu dari tiap pasangan.
++
++### Ralat terhadap eksperimen pertama
++
++Dugaan awalku "batch-5 dan batch-8 mati karena dibuat setelah batch-2 dan batch-3" ternyata benar tapi kurang tepat. Yang menentukan bukan umur **global**, melainkan umur **relatif terhadap pod lain di node yang sama**.
+ 
+ ---
+ 
+@@ -80,6 +116,7 @@ Konsekuensi konkret yang harus aku sampaikan ke tim:
+ 
+ - Job batch **wajib** bisa di-checkpoint dan dilanjutkan. Job 6 jam tanpa checkpoint di prioritas 8000 adalah job yang akan hilang.
+ - Pod telanjang tidak pernah kembali. batch-5 dan batch-8 mati dan tidak dihidupkan ulang, karena tidak ada Deployment atau Job yang memilikinya. `restartPolicy: Always` **tidak** menolong di sini — field itu mengatur restart container di dalam pod yang masih hidup, bukan menghidupkan objek pod yang sudah dihapus.
++- **Job yang paling baru masuk paling dulu mati** (Temuan 2), dan ini punya akibat yang lebih buruk daripada kelihatannya: job yang direbut lalu di-submit ulang langsung menjadi yang terbaru lagi, artinya jadi kandidat korban nomor satu pada gelombang preemption berikutnya. Tanpa penanganan, satu job bisa direbut berulang kali tanpa pernah selesai, sementara job yang lebih tua berjalan tenang. Yang butuh diperiksa: apakah Kueue/Volcano atau escalation prioritas saat requeue dipakai di platform produksi, atau tidak ada penanganan sama sekali.
+ - Tenant tidak bisa memprediksi job mana yang jadi korban. Kalau prediktabilitas dibutuhkan, tiebreak tidak bisa diandalkan — butuh PDB, prioritas yang benar-benar berbeda, atau kapasitas yang disisihkan.
+ 
+ ### Batas simulasi ini
+@@ -113,8 +150,9 @@ Itu keputusan bisnis, bukan keputusan teknis.
+ 
+ ## 5. Yang belum selesai
+ 
+-- [ ] Ulangi eksperimen 5–10 kali, konfirmasi hipotesis tiebreak di bagian 2
+-- [ ] Uji ulang dengan PDB dipasang, lihat apakah kriteria 1 mengubah pilihan node
++- [x] Ulangi eksperimen 5–10 kali — selesai, 10 putaran, dua temuan di bagian 2
++- [ ] Uji ulang dengan PDB dipasang: apakah kriteria 1 mengubah pilihan node dari acak menjadi terarah?
++- [ ] Uji apakah job yang di-submit ulang benar-benar jadi korban berulang (bahaya starvation di bagian 3)
+ - [ ] Uji ulang dengan prioritas batch yang berbeda-beda (8000 vs 9000), lihat kriteria 2 bekerja
+ - [ ] Isi tiga `[KEPUTUSANMU]` di bagian 4
+ - [ ] Uji mekanika preemption pada pod sungguhan di Sprint 2

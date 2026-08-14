@@ -1,0 +1,17 @@
+{{- $tier := index .Values.tiers .Values.tenant.tier }}
+# $tier adalah lookup dinamis: index .Values.tiers "small" == .Values.tiers.small.
+# Kalau .tenant.tier salah ketik (mis. "smal"), Helm gagal di sini dengan pesan
+# "nil pointer evaluating interface {}.gpu" — bukan diam-diam memakai nilai kosong.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: quota-{{ .Values.tenant.name }}
+  namespace: {{ .Values.tenant.name }}
+spec:
+  hard:
+    requests.nvidia.com/gpu: {{ $tier.gpu | quote }}
+    requests.cpu: {{ $tier.requestsCpu | quote }}
+    requests.memory: {{ $tier.requestsMemory | quote }}
+    limits.cpu: {{ $tier.limitsCpu | quote }}
+    limits.memory: {{ $tier.limitsMemory | quote }}
+    pods: {{ $tier.pods | quote }}

@@ -1,0 +1,63 @@
+# site-b — cermin site-a. Isi file ini identik dengan serving/sites/site-a.yaml
+# kecuali namespace. Penjelasan tiap field ada di file itu; sengaja tidak diulang di
+# sini supaya tidak ada dua versi komentar yang bisa saling bertentangan.
+#
+# Cek keduanya masih kembar:
+#   diff <(sed 's/site-a/SITE/g; /^ *#/d' serving/sites/site-a.yaml) \
+#        <(sed 's/site-b/SITE/g; /^ *#/d' serving/sites/site-b.yaml)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: site-b
+  labels:
+    lab.internal/site: site-b
+    lab.internal/peran: serving
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama-sim
+  namespace: site-b
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/autoscalerClass: none
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: gguf
+      runtime: llamacpp-openai
+      storageUri: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: deepseek-sim
+  namespace: site-b
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/autoscalerClass: none
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: gguf
+      runtime: llamacpp-openai
+      storageUri: https://huggingface.co/unsloth/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi

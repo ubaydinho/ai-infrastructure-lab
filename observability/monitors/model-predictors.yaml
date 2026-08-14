@@ -1,0 +1,43 @@
+# ServiceMonitor untuk semua pod predictor di kedua site.
+#
+# Dua hal yang didapat dari sini:
+#   1. Metrik llama.cpp — token, kedalaman antrean (llamacpp:requests_deferred).
+#      Antrean itu yang dipakai Sprint 4 untuk mencari titik beban mulai menumpuk.
+#   2. Metrik 'up' — dan ini pengganti yang benar untuk alert "endpoint down".
+#      Scrape adalah request HTTP sungguhan ke pod; kalau pod tidak menjawab,
+#      up=0. Bandingkan dengan condition Ready milik InferenceService, yang jadi
+#      False selama rolling update normal padahal trafik tidak pernah putus
+#      (temuan Sprint 2, lihat docs/20-serving-plane.md).
+#
+# BATASNYA JUJUR: scrape memukul /metrics, bukan /v1/chat/completions. Jadi up=1
+# berarti "proses server hidup dan menjawab HTTP", bukan "inferensi masih benar".
+# Untuk yang terakhir butuh probe sungguhan ke endpoint chat — pekerjaan Sprint 4.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: model-predictors
+  namespace: monitoring
+  labels:
+    lab.internal/peran: observability
+spec:
+  # Site ditulis eksplisit, bukan pakai selector luas. Kalau nanti ada site-c,
+  # nama itu harus muncul di sini — dan itu memang yang kita mau: penambahan site
+  # tidak boleh diam-diam tidak terpantau.
+  namespaceSelector:
+    matchNames:
+      - site-a
+      - site-b
+  selector:
+    matchLabels:
+      component: predictor
+  endpoints:
+    - port: http1
+      path: /metrics
+      interval: 30s
+      relabelings:
+        # Namespace = site. Dijadikan label 'site' supaya query dashboard dan
+        # rule bisa memisah per site tanpa menghafal bahwa 'namespace' artinya site.
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: site
+        - sourceLabels: [__meta_kubernetes_service_label_serving_kserve_io_inferenceservice]
+          targetLabel: model

@@ -1,0 +1,147 @@
+# kube-prometheus-stack untuk lab 8 GB. Chart 88.3.0 (operator v0.93.0), dipin di Makefile.
+#
+# Tiga kelompok keputusan di file ini, semuanya punya alasan:
+#   1. Komponen control plane yang tidak ada di k3s dimatikan — kalau tidak, alert
+#      palsu berbunyi terus dan kamu belajar mengabaikan alert.
+#   2. Resource di-scope ke angka yang muat berbarengan dengan 4 pod model.
+#   3. Rule dan dashboard bawaan dimatikan; kita tulis sendiri yang sedikit tapi
+#      bisa dijelaskan. Di produksi kamu justru mulai dari yang bawaan.
+#
+# Dipasang lewat: make obs
+
+## ---------- 1. k3s bukan Kubernetes "normal" ----------
+# Di k3s, apiserver/scheduler/controller-manager digabung jadi SATU proses, dan
+# etcd diganti sqlite. ServiceMonitor untuk komponen-komponen itu tidak akan pernah
+# punya target, dan alert *Down-nya menyala permanen. Ini bukan masalah lab —
+# di cluster produksi yang terkelola (EKS/GKE/PCAI-like) gejalanya sama persis.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+## ---------- 2. anggaran memori ----------
+# node-exporter dimatikan: dia melaporkan metrik HOST, dan di k3d ketiga "node"
+# berbagi satu kernel — jadi angkanya sama tiga kali. Sprint 3 butuh request rate,
+# latency, dan status pod. Nyalakan kembali di Sprint 4 kalau butuh metrik host.
+nodeExporter:
+  enabled: false
+
+kube-state-metrics:
+  # Ini yang menyediakan kube_pod_container_status_restarts_total —
+  # sumber alert "pod restart looping". Jangan dimatikan.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+prometheus:
+  prometheusSpec:
+    # 12 jam cukup untuk membandingkan sebelum/sesudah dalam satu sesi kerja.
+    retention: 12h
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    # Tanpa PVC: data hilang saat pod restart, dan itu keputusan yang benar di sini.
+    # PVC + local-path menambah satu bagian yang bisa rusak tanpa mengajarkan
+    # apa pun yang baru. Kalau butuh data lintas restart, itu pekerjaan Sprint 4.
+    retentionSize: ""
+    resources:
+      requests:
+        cpu: 150m
+        memory: 400Mi
+      limits:
+        memory: 900Mi
+
+    # PENTING. Secara default operator HANYA memungut ServiceMonitor/PodMonitor
+    # yang berlabel 'release: <nama-release>'. Dengan begitu monitor kita di
+    # observability/ harus ikut menempelkan label itu — mudah lupa, dan gejalanya
+    # membingungkan (target tidak muncul, tanpa error apa pun). Dimatikan supaya
+    # semua monitor di semua namespace dipungut.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+
+alertmanager:
+  alertmanagerSpec:
+    retention: 24h
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 96Mi
+
+grafana:
+  # Lab lokal yang tidak terekspos keluar laptop. Jangan pernah pola ini di produksi.
+  adminPassword: lab
+  persistence:
+    enabled: false
+
+  # Probe dilonggarkan JAUH di atas default (readiness timeout bawaan cuma 1 detik).
+  # Alasannya spesifik laptop: saat host mulai swap, /api/health bisa telat beberapa
+  # detik, kubelet menganggap Grafana mati, mengirim SIGTERM, dan Grafana restart
+  # persis waktu kamu sedang membuka dashboard — gejalanya terlihat seperti
+  # "Grafana lambat", padahal dia dibunuh dan dinyalakan ulang.
+  # Ini menyembuhkan GEJALA, bukan sebabnya. Sebabnya kurang RAM; lihat 'make mem'.
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    timeoutSeconds: 15
+    periodSeconds: 20
+    failureThreshold: 10
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    initialDelaySeconds: 90
+    timeoutSeconds: 30
+    periodSeconds: 30
+    failureThreshold: 15
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      # 256Mi TIDAK cukup — diuji langsung: Grafana 13 kena OOMKilled (exit 137)
+      # persis saat dashboard dibuka, karena render panel + query menaikkan alokasi
+      # jauh di atas 231Mi yang terlihat waktu idle. Jangan menyetel limit dari
+      # angka idle.
+      # Menaikkan limit tidak memakan RAM lebih banyak dengan sendirinya — limit
+      # bukan reservasi; yang menentukan penjadwalan adalah requests di atas.
+      memory: 512Mi
+  # Dashboard bawaan (~20 buah) dimatikan: berat dan mengubur yang kita bikin.
+  # Punya kita ada di observability/grafana/dashboards/, dipungut sidecar lewat label.
+  defaultDashboardsEnabled: false
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      resources:
+        requests:
+          cpu: 10m
+          memory: 48Mi
+        limits:
+          memory: 128Mi
+
+## ---------- 3. rule ----------
+# Rule bawaan dimatikan. Alasannya bukan memori — tapi supaya setiap alert yang
+# berbunyi di cluster ini adalah alert yang bisa kamu jelaskan asal-usulnya.
+# Punya kita ada di observability/rules/, dan diuji promtool di CI.
+defaultRules:
+  create: false

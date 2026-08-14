@@ -1,0 +1,157 @@
+# Alert rule lab. Sengaja sedikit: rule bawaan kube-prometheus-stack dimatikan
+# (lihat observability/values-kube-prometheus-stack.yaml) supaya setiap alert yang
+# berbunyi di cluster ini adalah alert yang bisa kamu jelaskan asal-usulnya.
+#
+# Diuji promtool: scripts/test-rules.sh — dan itu juga yang jalan di CI.
+#
+# CATATAN soal target kubelet yang selalu down: dua fake node KWOK memang tidak
+# punya kubelet, jadi 6 target-nya (metrics/cadvisor/probes × 2 node) permanen down.
+# Itu jujur, bukan bug. Karena itu di sini TIDAK ADA alert "TargetDown" borongan —
+# alert borongan begitu akan menyala selamanya dan mengajari orang mengabaikannya.
+# Yang ada cuma NodeKubeletDown yang secara eksplisit mengecualikan node kwok.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: serving
+  namespace: monitoring
+  labels:
+    lab.internal/peran: observability
+spec:
+  groups:
+    - name: serving-endpoint
+      rules:
+        # Pengganti yang benar untuk "endpoint down".
+        # JANGAN pakai condition Ready milik InferenceService: dia jadi False selama
+        # rolling update normal padahal trafik tidak pernah putus (temuan Sprint 2,
+        # docs/20-serving-plane.md). 'up' berasal dari scrape — request HTTP sungguhan
+        # ke pod. Kalau pod tidak menjawab, up=0.
+        - alert: ModelEndpointDown
+          expr: up{job=~".+-predictor"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Endpoint {{ $labels.model }} di {{ $labels.site }} tidak menjawab"
+            description: >-
+              Scrape ke pod predictor gagal selama 2 menit. Ini bukan rolling update —
+              rolling update mempertahankan pod lama sampai pod baru siap.
+              Cek: kubectl get pods -n {{ $labels.site }}
+
+        # Dua site active-active. Satu endpoint mati itu buruk; SEMUA endpoint di satu
+        # site mati adalah skenario failover — beban pindah ke site sebelah.
+        - alert: SiteDown
+          expr: sum by (site) (up{job=~".+-predictor"}) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Semua model di {{ $labels.site }} tidak menjawab"
+            description: >-
+              Seluruh site tidak melayani padahal target-nya masih terdaftar.
+              Kalau tidak disengaja, site sebelah sekarang menanggung 100% beban.
+
+        # ---------------------------------------------------------------------
+        # DUA ATURAN DI BAWAH ADA KARENA 'up == 0' PUNYA LUBANG BESAR.
+        #
+        # 'up == 0' hanya cocok kalau target masih TERDAFTAR tapi gagal dijawab.
+        # Waktu satu site benar-benar dimatikan (anotasi serving.kserve.io/stop),
+        # KServe menghapus Deployment, Service, Endpoints, dan Pod sekaligus —
+        # target hilang dari service discovery, dan series 'up' bukan menjadi 0,
+        # melainkan BERHENTI ADA. Tidak ada yang cocok, tidak ada alert. Diuji
+        # langsung: site-b dimatikan penuh, semua rule diam.
+        #
+        # Ini persis skenario failover Sprint 4 — kalau dibiarkan, alerting justru
+        # bisu tepat pada kejadian yang paling penting.
+        #
+        # absent() menghasilkan series justru ketika input kosong. Konsekuensinya
+        # daftar site harus ditulis eksplisit satu per satu — itu memang disengaja,
+        # sama seperti di observability/monitors/model-predictors.yaml: menambah
+        # site-c harus menyentuh file ini, supaya tidak ada site yang tak terpantau.
+        - alert: SiteEndpointsAbsent
+          expr: absent(up{job=~".+-predictor", site="site-a"})
+          for: 2m
+          labels:
+            severity: critical
+            site: site-a
+          annotations:
+            summary: "site-a tidak punya endpoint terdaftar sama sekali"
+            description: >-
+              Bukan "tidak menjawab" — target scrape-nya hilang dari service discovery.
+              Penyebab lazim: InferenceService dimatikan (anotasi serving.kserve.io/stop),
+              namespace terhapus, atau ServiceMonitor tidak lagi cocok.
+              Cek: kubectl get isvc,deploy,svc -n site-a
+
+        - alert: SiteEndpointsAbsent
+          expr: absent(up{job=~".+-predictor", site="site-b"})
+          for: 2m
+          labels:
+            severity: critical
+            site: site-b
+          annotations:
+            summary: "site-b tidak punya endpoint terdaftar sama sekali"
+            description: >-
+              Bukan "tidak menjawab" — target scrape-nya hilang dari service discovery.
+              Penyebab lazim: InferenceService dimatikan (anotasi serving.kserve.io/stop),
+              namespace terhapus, atau ServiceMonitor tidak lagi cocok.
+              Cek: kubectl get isvc,deploy,svc -n site-b
+
+        - alert: ModelPodRestartLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace=~"site-.+"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} di {{ $labels.namespace }} restart berulang"
+            description: >-
+              Lebih dari 3 restart dalam 15 menit. Di laptop, tersangka pertama adalah
+              probe timeout karena thrashing memori — bukan bug konfigurasi.
+              Cek 'make mem' sebelum menyalahkan manifest.
+
+    - name: serving-latency
+      rules:
+        # Latency diukur di Traefik, bukan di dalam pod: yang penting adalah angka yang
+        # dirasakan client. Bucket bawaan Traefik kasar (0.1 / 0.3 / 1.2 / 5 / +Inf),
+        # jadi p95 di sini adalah interpolasi kasar — cukup untuk menangkap "jelas rusak",
+        # tidak cukup untuk menyetel SLO. Kalau butuh presisi, atur bucket Traefik dulu.
+        - alert: ServingLatencyP95High
+          expr: |
+            histogram_quantile(0.95,
+              sum by (service, le) (
+                rate(traefik_service_request_duration_seconds_bucket{service=~"site-.+-predictor-80@kubernetes"}[5m])
+              )
+            ) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "p95 latency {{ $labels.service }} di atas 5 detik"
+            description: >-
+              Baseline lab dengan model 135M di CPU adalah 0.2-0.5 detik.
+              Di atas 5 detik berarti antrean menumpuk atau node kehabisan CPU.
+              Bandingkan dengan llamacpp:requests_deferred di dashboard.
+
+    - name: cluster-health
+      rules:
+        # Node KWOK dikecualikan lewat TAINT-nya, bukan lewat label.
+        #
+        # Percobaan pertama memakai kube_node_labels{label_type="kwok"} dan itu SALAH:
+        # kube-state-metrics v2 tidak mengekspos label node sama sekali kecuali dijalankan
+        # dengan --metric-labels-allowlist. Seriesnya kosong, 'unless' tidak mengecualikan
+        # apa pun, dan alert ini menyala untuk dua node palsu. Unit test-nya tetap hijau,
+        # karena test memberi makan series buatan yang di dunia nyata tidak ada.
+        # Pelajarannya: unit test membuktikan LOGIKA ekspresi, bukan bahwa series yang
+        # dirujuk benar-benar ada. Yang membuktikan itu cuma melihat rule di cluster.
+        #
+        # kube_node_spec_taint ada secara default, dan taint itu justru mekanisme yang
+        # sama yang menahan pod model supaya tidak mendarat di node palsu.
+        - alert: NodeKubeletDown
+          expr: |
+            (up{job="kubelet"} == 0)
+            unless on (node) (kube_node_spec_taint{key="kwok.x-k8s.io/node"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Kubelet di node sungguhan {{ $labels.node }} tidak merespons"
+            description: >-
+              Node ini bukan fake node KWOK, jadi kubelet-nya memang seharusnya hidup.

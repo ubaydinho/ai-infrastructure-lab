@@ -1,0 +1,27 @@
+# PodMonitor untuk Traefik — INI sumber "request rate" dan "latency p95".
+#
+# Kenapa Traefik dan bukan pod model: llama.cpp mengekspos token dan kedalaman
+# antrean, tapi TIDAK punya counter request maupun histogram latency. Traefik punya
+# keduanya, dan mengukurnya di tempat yang benar — di titik masuk, tempat client
+# merasakannya. Latency yang diukur di dalam pod selalu terlihat lebih bagus
+# daripada yang dirasakan pemakai.
+#
+# Kenapa PodMonitor dan bukan ServiceMonitor: Traefik bawaan k3s SUDAH mengekspos
+# /metrics di container port 9100 (diverifikasi), tapi Service-nya cuma membuka
+# 80 dan 443. PodMonitor menembak pod langsung, jadi tidak perlu menyentuh config
+# Traefik lewat HelmChartConfig sama sekali.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: traefik
+  namespace: kube-system
+  labels:
+    lab.internal/peran: observability
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

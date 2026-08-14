@@ -28,18 +28,34 @@ jobs:
       - name: validasi skema manifest
         run: |
           # Yang dikecualikan cuma file yang memang bukan manifest Kubernetes:
-          # values Helm dan registries.yaml (config containerd). Node KWOK palsu
-          # tidak dikecualikan — lihat catatan di target test-schema Makefile.
+          # values Helm, registries.yaml (config containerd), dan kasus uji promtool.
+          # Node KWOK palsu tidak dikecualikan — lihat catatan di target test-schema Makefile.
           kubeconform -strict -summary -ignore-missing-schemas \
             -ignore-filename-pattern 'values.*\.yaml' \
             -ignore-filename-pattern 'registries\.yaml' \
+            -ignore-filename-pattern '_test\.yaml' \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
             cluster/ sim/ serving/
 
-  # Aktif mulai Sprint 4 — alert rule yang punya unit test.
-  # rules:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - run: promtool test rules observability/tests/*.yaml
+  rules:
+    name: unit test alert rule
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: pasang promtool
+        run: |
+          # Versi dipin supaya hasil test di CI sama dengan di laptop.
+          PVER=3.13.1
+          curl -fsSL -o /tmp/prom.tgz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PVER}/prometheus-${PVER}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prom.tgz -C /tmp --strip-components=1 "prometheus-${PVER}.linux-amd64/promtool"
+          sudo install -m 0755 /tmp/promtool /usr/local/bin/promtool
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+
+      - name: unit test rule
+        # Bukan 'promtool test rules' langsung: rule kita tersimpan sebagai
+        # PrometheusRule (objek Kubernetes), dan promtool tidak mengerti itu.
+        # Skripnya mengekstrak .spec dulu — lihat komentar di dalamnya.
+        run: bash scripts/test-rules.sh

@@ -1,0 +1,143 @@
+# Unit test untuk observability/rules/serving.yaml.
+# Jalankan: make test-rules   (atau bash scripts/test-rules.sh)
+#
+# Kenapa alert perlu diuji: alert yang tidak pernah diuji cuma niat baik. Yang
+# paling sering salah bukan ekspresinya, tapi 'for:' — orang mengira alert langsung
+# menyala, padahal harus bertahan dulu. Test di bawah memeriksa keduanya:
+# TIDAK menyala saat masih di dalam jendela 'for', menyala setelah lewat.
+rule_files:
+  - serving.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------
+  - name: satu endpoint mati, endpoint tetangga di site yang sama tetap hidup
+    interval: 1m
+    input_series:
+      - series: 'up{job="llama-sim-predictor", site="site-a", model="llama-sim", namespace="site-a"}'
+        values: "1 1 0 0 0 0 0 0"
+      - series: 'up{job="deepseek-sim-predictor", site="site-a", model="deepseek-sim", namespace="site-a"}'
+        values: "1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      # Baru 1 menit down — 'for: 2m' belum terpenuhi, harus diam.
+      - eval_time: 3m
+        alertname: ModelEndpointDown
+        exp_alerts: []
+      # Sudah 3 menit down — menyala.
+      - eval_time: 5m
+        alertname: ModelEndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: llama-sim-predictor
+              site: site-a
+              model: llama-sim
+              namespace: site-a
+            exp_annotations:
+              summary: "Endpoint llama-sim di site-a tidak menjawab"
+              description: "Scrape ke pod predictor gagal selama 2 menit. Ini bukan rolling update — rolling update mempertahankan pod lama sampai pod baru siap. Cek: kubectl get pods -n site-a"
+      # Satu dari dua endpoint mati bukan site down.
+      - eval_time: 5m
+        alertname: SiteDown
+        exp_alerts: []
+
+  # ---------------------------------------------------------------
+  - name: seluruh site mati memicu SiteDown
+    interval: 1m
+    input_series:
+      - series: 'up{job="llama-sim-predictor", site="site-b", model="llama-sim", namespace="site-b"}'
+        values: "1 0 0 0 0 0 0 0"
+      - series: 'up{job="deepseek-sim-predictor", site="site-b", model="deepseek-sim", namespace="site-b"}'
+        values: "1 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SiteDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              site: site-b
+            exp_annotations:
+              summary: "Semua model di site-b tidak menjawab"
+              description: "Seluruh site tidak melayani padahal target-nya masih terdaftar. Kalau tidak disengaja, site sebelah sekarang menanggung 100% beban."
+
+  # ---------------------------------------------------------------
+  # Test ini menjaga lubang yang paling mahal: target yang HILANG, bukan yang gagal.
+  # site-a punya series, site-b tidak punya sama sekali — persis keadaan setelah
+  # InferenceService dimatikan dengan anotasi serving.kserve.io/stop, karena KServe
+  # ikut menghapus Deployment/Service/Endpoints. 'up == 0' buta terhadap kasus ini.
+  - name: site yang endpoint-nya hilang sama sekali tetap terdeteksi
+    interval: 1m
+    input_series:
+      - series: 'up{job="llama-sim-predictor", site="site-a", model="llama-sim", namespace="site-a"}'
+        values: "1+0x10"
+      - series: 'up{job="deepseek-sim-predictor", site="site-a", model="deepseek-sim", namespace="site-a"}'
+        values: "1+0x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SiteEndpointsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              site: site-b
+            exp_annotations:
+              summary: "site-b tidak punya endpoint terdaftar sama sekali"
+              description: "Bukan \"tidak menjawab\" — target scrape-nya hilang dari service discovery. Penyebab lazim: InferenceService dimatikan (anotasi serving.kserve.io/stop), namespace terhapus, atau ServiceMonitor tidak lagi cocok. Cek: kubectl get isvc,deploy,svc -n site-b"
+      # site-a punya endpoint, jadi SiteDown (yang butuh series ada) harus diam.
+      - eval_time: 5m
+        alertname: SiteDown
+        exp_alerts: []
+
+  # ---------------------------------------------------------------
+  - name: restart berulang menyala di atas 3 kali per 15 menit
+    interval: 1m
+    input_series:
+      # 6 restart dalam 15 menit.
+      - series: 'kube_pod_container_status_restarts_total{namespace="site-a", pod="llama-sim-predictor-abc", container="kserve-container"}'
+        values: "0+1x20"
+      # Tetangga yang sehat: tidak pernah restart, tidak boleh ikut menyala.
+      - series: 'kube_pod_container_status_restarts_total{namespace="site-a", pod="deepseek-sim-predictor-xyz", container="kserve-container"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ModelPodRestartLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: site-a
+              pod: llama-sim-predictor-abc
+              container: kserve-container
+            exp_annotations:
+              summary: "Pod llama-sim-predictor-abc di site-a restart berulang"
+              description: "Lebih dari 3 restart dalam 15 menit. Di laptop, tersangka pertama adalah probe timeout karena thrashing memori — bukan bug konfigurasi. Cek 'make mem' sebelum menyalahkan manifest."
+
+  # ---------------------------------------------------------------
+  # Ini test yang paling penting di file ini: membuktikan fake node KWOK benar-benar
+  # dikecualikan. Tanpa 'unless', alert ini menyala permanen untuk 2 node palsu dan
+  # seluruh alerting jadi tidak dipercaya.
+  # Nama series di bawah HARUS yang benar-benar ada di cluster. Versi pertama test ini
+  # memakai kube_node_labels{label_type="kwok"} dan lulus — padahal series itu tidak
+  # pernah ada (kube-state-metrics v2 tidak mengekspos label node tanpa allowlist),
+  # sehingga rule-nya menyala di cluster sungguhan. Verifikasi sekali dengan:
+  #   kubectl -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090:9090
+  #   curl -s --data-urlencode 'query=kube_node_spec_taint' localhost:9090/api/v1/query
+  - name: kubelet mati di node palsu diabaikan, di node sungguhan menyala
+    interval: 1m
+    input_series:
+      - series: 'up{job="kubelet", node="gpu-worker-01"}'
+        values: "0+0x10"
+      - series: 'kube_node_spec_taint{node="gpu-worker-01", key="kwok.x-k8s.io/node", value="fake", effect="NoSchedule"}'
+        values: "1+0x10"
+      - series: 'up{job="kubelet", node="k3d-lab-agent-0"}'
+        values: "0+0x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: NodeKubeletDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: kubelet
+              node: k3d-lab-agent-0
+            exp_annotations:
+              summary: "Kubelet di node sungguhan k3d-lab-agent-0 tidak merespons"
+              description: "Node ini bukan fake node KWOK, jadi kubelet-nya memang seharusnya hidup."

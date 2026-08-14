@@ -1,0 +1,154 @@
+# Dashboard Grafana untuk serving plane dua site.
+#
+# Dibungkus sebagai ConfigMap ber-label 'grafana_dashboard: "1"' — sidecar Grafana
+# memungut ConfigMap berlabel itu dari SEMUA namespace dan memuat isinya. Karena
+# ditulis sebagai manifest biasa (bukan digenerate 'kubectl create configmap'),
+# dia ikut divalidasi 'make test-schema' dan diff-nya terbaca di git.
+#
+# Datasource sengaja tidak ditulis di tiap panel: kube-prometheus-stack sudah
+# menjadikan Prometheus datasource default, dan menyebut UID-nya eksplisit justru
+# bikin dashboard ini pecah kalau dipasang di Grafana lain.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-serving
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    lab.internal/peran: observability
+data:
+  serving.json: |
+    {
+      "uid": "serving-2site",
+      "title": "Serving — dua site",
+      "tags": ["lab", "serving"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Endpoint hidup",
+          "description": "Jumlah pod predictor yang menjawab scrape. Harusnya 4 (2 model x 2 site). Ini pengganti condition Ready milik InferenceService, yang jadi False saat rolling update normal.",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+          "targets": [
+            { "expr": "sum(up{job=~\".+-predictor\"})", "legendFormat": "hidup", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "orange", "value": 3 },
+                  { "color": "green", "value": 4 }
+                ]
+              },
+              "max": 4, "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Request/detik (semua endpoint)",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum(rate(traefik_service_requests_total{service=~\"site-.+-predictor-80@kubernetes\"}[5m]))",
+              "legendFormat": "req/s",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "decimals": 2, "unit": "reqps" }, "overrides": [] }
+        },
+        {
+          "type": "stat",
+          "title": "p95 latency (semua endpoint)",
+          "description": "Baseline lab: 0.2-0.5 detik untuk model 135M di CPU. Bucket bawaan Traefik kasar (0.1/0.3/1.2/5), jadi angka ini interpolasi — cukup untuk melihat tren, tidak cukup untuk menyetel SLO.",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\"site-.+-predictor-80@kubernetes\"}[5m])))",
+              "legendFormat": "p95",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "decimals": 3, "unit": "s" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Request rate per endpoint",
+          "description": "Diukur di Traefik — titik masuk, tempat client merasakannya. label_replace memecah nama service Traefik jadi site dan model supaya legenda terbaca.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "targets": [
+            {
+              "expr": "label_replace(label_replace(sum by (service) (rate(traefik_service_requests_total{service=~\"site-.+-predictor-80@kubernetes\"}[5m])), \"site\", \"$1\", \"service\", \"(site-[a-z]+)-.*\"), \"model\", \"$1\", \"service\", \"site-[a-z]+-(.+)-predictor-80@kubernetes\")",
+              "legendFormat": "{{site}} / {{model}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency p95 per endpoint",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "targets": [
+            {
+              "expr": "label_replace(label_replace(histogram_quantile(0.95, sum by (service, le) (rate(traefik_service_request_duration_seconds_bucket{service=~\"site-.+-predictor-80@kubernetes\"}[5m]))), \"site\", \"$1\", \"service\", \"(site-[a-z]+)-.*\"), \"model\", \"$1\", \"service\", \"site-[a-z]+-(.+)-predictor-80@kubernetes\")",
+              "legendFormat": "{{site}} / {{model}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Antrean di dalam server model",
+          "description": "llamacpp:requests_deferred adalah request yang MENUNGGU slot. Angka ini yang dicari Sprint 4: titik saat beban mulai menumpuk, bukan saat endpoint mati.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "targets": [
+            {
+              "expr": "llamacpp:requests_processing",
+              "legendFormat": "diproses — {{site}} / {{model}}",
+              "refId": "A"
+            },
+            {
+              "expr": "llamacpp:requests_deferred",
+              "legendFormat": "MENUNGGU — {{site}} / {{model}}",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Token dihasilkan per detik",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "targets": [
+            {
+              "expr": "rate(llamacpp:tokens_predicted_total[5m])",
+              "legendFormat": "{{site}} / {{model}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Restart container per 15 menit",
+          "description": "Di laptop, tersangka pertama restart berulang adalah probe timeout karena thrashing memori — bukan bug konfigurasi. Cek 'make mem' dulu.",
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 20 },
+          "targets": [
+            {
+              "expr": "increase(kube_pod_container_status_restarts_total{namespace=~\"site-.+\"}[15m])",
+              "legendFormat": "{{namespace}} / {{pod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+        }
+      ]
+    }

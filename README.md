@@ -101,16 +101,19 @@ Wajib dicek ulang begitu ada akses hands-on. Jangan biarkan lab jadi sumber kebe
 
   Bukti jalan, penyimpangan dari rencana, dan tiga temuan yang mengubah Sprint 3-4: **`docs/20-serving-plane.md`**. Reproduksi: `make up-serving && make smoke`.
 
-**Sprint 3 — Observability**
+**Sprint 3 — Observability — SELESAI (2026-08-14)**
 - Install kube-prometheus-stack, resource request di-scope biar muat di 8GB
 - Dashboard Grafana minimal: request rate, latency p95, status pod — per site
 - Alert rule dasar: endpoint down, pod restart looping. Catatan dari Sprint 2: **jangan bangun alert "endpoint down" di atas condition `Ready` milik InferenceService** — condition itu jadi `False` selama rolling update normal padahal trafik tidak pernah putus. Ukur dengan request sungguhan, seperti `scripts/smoke-serving.sh`
 - Ini jadi dasar pembanding waktu kamu lihat Grafana kantor beneran
 
+  Bukti jalan + tiga temuan (yang terpenting: `up == 0` buta terhadap target yang hilang): **`docs/30-observability.md`**. Reproduksi: `make up-obs && make smoke`, lalu `make grafana`.
+
 **Sprint 4 — Skenario kapasitas & failover**
 - Load test terkontrol ke plane nyata (k6 atau locust), cari titik antrean mulai numpuk
 - Simulasi "site mati": `kubectl annotate isvc <nama> -n site-a serving.kserve.io/stop=true`, ukur berapa lama site-b menyerap beban. **Jangan pakai `kubectl scale --replicas=0`** — controller KServe mengembalikannya dari `minReplicas` dalam ~8 detik (dibuktikan di Sprint 2, lihat `docs/20-serving-plane.md`)
 - Pakai plane KWOK untuk skenario skala besar (8x H200 penuh) yang tidak muat di laptop
+- Catatan dari Sprint 3: yang mendeteksi site mati adalah `SiteEndpointsAbsent` (berbasis `absent()`), **bukan** `up == 0` — waktu site dimatikan, target scrape-nya hilang dari service discovery dan `up` berhenti ada, bukan menjadi 0. Ukur durasi failover dari alert itu, atau langsung dari `traefik_service_requests_total` per site
 - Output: draft angka kapasitas + runbook failover — bentuk yang sama dipakai di kerjaan asli
 
 **Sprint 5 — Model lifecycle**

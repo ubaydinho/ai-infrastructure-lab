@@ -48,7 +48,8 @@ spec:
             --port 8080 \
             --ctx-size 512 \
             --threads 2 \
-            --no-webui
+            --no-webui \
+            --metrics
       env:
         # Bikin /v1/models melaporkan nama InferenceService ('llama-sim' / 'deepseek-sim')
         # dan bukan path file GGUF. Dua endpoint jadi benar-benar terbedakan dari sisi
@@ -61,6 +62,11 @@ spec:
         - containerPort: 8080
           name: http1
           protocol: TCP
+      # --metrics di atas membuka /metrics di port yang sama. Yang diekspos llama.cpp:
+      # token (prompt/predicted), detik yang dipakai, dan — yang paling berguna nanti —
+      # llamacpp:requests_processing dan llamacpp:requests_deferred, yaitu kedalaman
+      # antrean. CATATAN: TIDAK ada counter request dan TIDAK ada histogram latency
+      # di sini; keduanya diambil dari Traefik. Lihat observability/monitors/.
       # Probe ditulis eksplisit supaya KServe tidak memasang probe bawaannya:
       # default protokol v1 memanggil /v1/models/<nama>, endpoint yang tidak disediakan
       # llama.cpp. /health adalah milik llama.cpp sendiri.

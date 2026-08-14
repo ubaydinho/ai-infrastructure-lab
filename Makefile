@@ -23,6 +23,10 @@ KSERVE_VER   ?= v0.18.1
 # Dikosongkan = ambil terbaru. Isi begitu kamu tahu angkanya, biar reproducible.
 KYVERNO_CHART ?=
 
+# kube-prometheus-stack: versi CHART (app = prometheus-operator v0.93.0).
+# Resolve ulang sebelum bump:  helm search repo prometheus-community/kube-prometheus-stack --versions | head -3
+KPS_CHART    ?= 88.3.0
+
 # k3s v1.36.2+k3s1 adalah stable terbaru, tapi JANGAN otomatis pakai yang terbaru:
 # KServe punya matriks dukungan yang tertinggal 1-2 minor di belakang
 # Kubernetes. Cluster yang terlalu baru gagal dengan cara yang membingungkan.
@@ -69,8 +73,8 @@ up-sim: kwok ## Pasang 2 worker H200 palsu + PriorityClass (butuh up-core)
 up-serving: kserve sites ## ~1.6 GB (terukur) — KServe RawDeployment + 4 InferenceService di 2 site
 	@echo ">> serving plane siap. Uji jalur request: make smoke"
 
-up-obs: ## ~2.3 GB — Prometheus + Grafana + fake DCGM exporter
-	@echo ">> Sprint 4. Belum diimplementasi."
+up-obs: obs obs-config ## Prometheus + Grafana + Alertmanager + monitor/rule/dashboard lab
+	@echo ">> observability siap. Buka Grafana: make grafana"
 
 ##@ Komponen
 
@@ -115,6 +119,20 @@ sites: kserve ## site-a & site-b, masing-masing llama-sim + deepseek-sim
 	done
 	@$(KUBECTL) get inferenceservice -A
 
+obs: ## kube-prometheus-stack, di-scope untuk 8 GB (lihat observability/values-*.yaml)
+	@helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || true
+	@helm repo update prometheus-community >/dev/null
+	@helm upgrade --install kps prometheus-community/kube-prometheus-stack \
+		--version $(KPS_CHART) -n monitoring --create-namespace \
+		-f observability/values-kube-prometheus-stack.yaml \
+		--wait --timeout 12m
+	@$(KUBECTL) -n monitoring get pods
+
+obs-config: ## PodMonitor/ServiceMonitor + PrometheusRule + dashboard Grafana
+	@$(KUBECTL) apply -f observability/monitors/
+	@$(KUBECTL) apply -f observability/rules/
+	@$(KUBECTL) apply -f observability/grafana/dashboards/
+
 ##@ Operasi
 
 status: ## Ringkasan cluster
@@ -127,6 +145,10 @@ status: ## Ringkasan cluster
 
 smoke: ## Uji jalur request ke 4 endpoint lewat ingress (butuh up-serving)
 	@bash scripts/smoke-serving.sh
+
+grafana: ## Port-forward Grafana ke localhost:3000 (user admin, password lab)
+	@echo ">> http://localhost:3000  — admin / lab   (Ctrl-C untuk berhenti)"
+	@$(KUBECTL) -n monitoring port-forward svc/kps-grafana 3000:80
 
 mem: ## Anggaran memori sekarang — sering-sering lihat ini
 	@docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}" | head -12
@@ -141,22 +163,26 @@ clean: ## Rapikan image lama (150 GB tidak selega kelihatannya)
 
 ##@ Test — semua tanpa cluster, sama persis dengan yang jalan di CI
 
-test: test-lint test-schema ## Jalankan semua test lokal
+test: test-lint test-schema test-rules ## Jalankan semua test lokal
 
 test-lint: ## helm lint semua chart, termasuk yang diarsipkan
 	@for c in charts/*/ charts/_archive/*/; do if [ -f "$$c/Chart.yaml" ]; then helm lint "$$c"; fi; done
 
-# Dua pola yang dikecualikan adalah file YANG MEMANG BUKAN manifest Kubernetes:
-# values Helm (input chart) dan registries.yaml (config containerd). Node KWOK
-# palsu SENGAJA tidak dikecualikan — field wajibnya diisi di sim/nodes/ supaya
-# validasi tetap -strict. Setiap pengecualian baru di sini adalah tempat bug
-# bersembunyi; tambahkan hanya kalau file itu benar-benar bukan manifest.
+# Pola yang dikecualikan adalah file YANG MEMANG BUKAN manifest Kubernetes:
+# values Helm (input chart), registries.yaml (config containerd), dan *_test.yaml
+# (kasus uji promtool). Node KWOK palsu SENGAJA tidak dikecualikan — field wajibnya
+# diisi di sim/nodes/ supaya validasi tetap -strict. Setiap pengecualian baru di sini
+# adalah tempat bug bersembunyi; tambahkan hanya kalau file itu benar-benar bukan manifest.
 test-schema: ## Validasi manifest terhadap skema Kubernetes dan CRD
 	@kubeconform -strict -summary -ignore-missing-schemas \
 		-ignore-filename-pattern 'values.*\.yaml' \
 		-ignore-filename-pattern 'registries\.yaml' \
+		-ignore-filename-pattern '_test\.yaml' \
 		-schema-location default \
 		-schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-		cluster/ sim/ serving/
+		cluster/ sim/ serving/ observability/
 
-.PHONY: help preflight cluster up-core up-sim up-serving up-obs cert-manager kyverno kwok kserve sites status smoke mem down clean test test-lint test-schema
+test-rules: ## Unit test alert rule (promtool) — sama dengan yang jalan di CI
+	@bash scripts/test-rules.sh
+
+.PHONY: help preflight cluster up-core up-sim up-serving up-obs cert-manager kyverno kwok kserve sites obs obs-config status smoke grafana mem down clean test test-lint test-schema test-rules

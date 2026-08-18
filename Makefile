@@ -1,6 +1,17 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
+# Aturan main lab ini:
+#
+# 1. Setiap perubahan butuh bukti jalan — output command atau test lulus — sebelum
+#    dianggap selesai. 'make test' jalan tanpa cluster dan sama persis dengan CI.
+# 2. Naikkan per profil (up-core → up-sim → up-serving → up-obs), jangan sekaligus,
+#    dan lihat 'make mem' di antaranya. Di 8 GB urutan ini yang bikin muat.
+# 3. Untuk uji failover, matikan endpoint dengan anotasi:
+#      kubectl annotate isvc <nama> -n site-a serving.kserve.io/stop=true
+#    JANGAN 'kubectl scale --replicas=0' — controller KServe mengembalikannya dari
+#    spec.predictor.minReplicas dalam ~8 detik. Bukti: docs/20-serving-plane.md 3.2
+
 CLUSTER      ?= lab
 KUBECTL      ?= kubectl
 

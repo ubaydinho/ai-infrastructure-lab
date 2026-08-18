@@ -1,131 +1,170 @@
-# Substrate Lab v2 — Simulasi Serving Layer
+# Substrate Lab — Simulasi Serving Layer LLM
 
-## Kenapa direvisi
+Lab lokal yang meniru serving layer inferensi LLM: dua site active-active, dua model per
+site, pod fixed tanpa autoscaling, plus observability lengkap. Semuanya jalan di laptop
+8 GB tanpa GPU.
 
-Lab awal (Sprint 0-1) dirancang di sekitar multi-tenancy: chart `tenant-bootstrap` dengan tier small/medium/dedicated, ResourceQuota per tim. Setelah melihat gambaran platform produksi yang sebenarnya — lewat satu meeting dan dua workbook monitoring resmi — scope kerja ternyata jauh lebih sempit:
+Batas scope: lab berhenti di titik yang sama dengan tanggung jawab kerja aslinya — menerima
+HTTP request di endpoint model, mengembalikan token. RAG, notebook, dan pipeline training
+milik pihak lain dan tidak disimulasikan.
 
-- Satu client, dua model (Llama + DeepSeek), pod tetap tanpa autoscaling
-- Serving-only: RAG dan data ada sepenuhnya di sisi client
-- Dua site active-active, masing-masing satu unit platform ukuran Medium
-- Monitoring resmi menyebut tool spesifik: KServe/Triton untuk endpoint inferensi, Prometheus + Grafana + Alertmanager untuk observability, Harbor untuk registry
-
-Lab v2 mengganti fokus dari "platform multi-tenant" ke "serving layer yang bisa gagal dan pulih", supaya artifact yang dihasilkan (angka kapasitas, perilaku failover, model lifecycle) langsung relevan ke pekerjaan asli.
-
-Sprint 0 dan chart `tenant-bootstrap` dari Sprint 1 **tidak dihapus** — tetap valid sebagai contoh RBAC/NetworkPolicy/Helm testing, hanya bukan lagi jalur utama. Lihat "Yang tetap dipakai" di bawah.
-
-## Keputusan: RAG dikesampingkan
-
-RAG itu milik client, bukan milik kita, dan kita tidak punya gambaran arsitekturnya sama sekali — framework apa, vector DB apa, chunking strategy apa. Mensimulasikannya berarti menebak, bukan belajar sesuatu yang bisa diverifikasi. Lab ini berhenti di titik yang sama dengan tanggung jawab kerja sebenarnya: menerima HTTP request di endpoint model, mengembalikan token. Apa pun yang terjadi sebelum request itu sampai (retrieval, prompt construction) ada di luar boundary lab maupun boundary pekerjaan.
-
-## Prinsip untuk bagian yang belum diketahui
-
-Beberapa detail produksi belum bisa diverifikasi (load balancer persis apa, apakah InferenceService CRD atau Deployment polos, Istio penuh atau ingress controller lain). Untuk tiap bagian yang tidak pasti, lab memakai default yang **paling dekat dengan yang tersirat dari checklist resmi** (nama tool yang disebut eksplisit di dokumen monitoring) — bukan arsitektur berbeda. Setiap asumsi ditandai eksplisit di bagian "Asumsi & cara verifikasi" supaya gampang dikoreksi begitu ada akses hands-on.
-
-## Arsitektur yang disimulasikan
+## Arsitektur
 
 ```
-RAG milik client (DI LUAR SCOPE — tidak disimulasikan)
+Client (RAG, prompt construction — DI LUAR SCOPE)
         |  HTTPS, format OpenAI-compatible
         v
 +-------------------------------------------------------+
 |   namespace: site-a          namespace: site-b         |
 |   +------------------+       +------------------+      |
-|   | Ingress (Traefik) |       | Ingress (Traefik) |      |
+|   | Ingress (Traefik)|       | Ingress (Traefik)|      |
 |   +--------+---------+       +--------+---------+      |
 |            v                          v                |
-|   +------------------+       +------------------+      |
-|   | InferenceService  |       | InferenceService  |      |
-|   |  llama-sim (Raw)  |       |  llama-sim (Raw)  |      |
-|   |  deepseek-sim(Raw)|       |  deepseek-sim(Raw)|      |
-|   +--------+---------+       +--------+---------+      |
+|   +-------------------+      +-------------------+     |
+|   | InferenceService  |      | InferenceService  |     |
+|   |  llama-sim (Raw)  |      |  llama-sim (Raw)  |     |
+|   |  deepseek-sim(Raw)|      |  deepseek-sim(Raw)|     |
+|   +--------+----------+      +--------+----------+     |
 |            v                          v                |
 |      predictor pods              predictor pods        |
-|      (llama.cpp, model 135M beneran jalan)              |
+|      (llama.cpp, model 135M beneran jalan)             |
 +-------------------------------------------------------+
-        |
+        |  scrape
         v
-  KWOK plane (simulasi 8x H200 lintas 2 site, fake node)
-  dipakai untuk skenario kapasitas & preemption tanpa
-  GPU sungguhan
+  monitoring: Prometheus + Grafana + Alertmanager
 ```
 
-Dua plane dari Sprint 0 tetap dipertahankan: plane nyata (k3d asli, model kecil beneran jalan) untuk uji fungsional, dan plane KWOK (fake node besar) untuk uji skenario kapasitas/preemption yang butuh skala GPU besar tanpa GPU sungguhan.
+### Dua plane
 
-## Pemetaan komponen
+| Plane | Isi | Dipakai untuk |
+|---|---|---|
+| Plane nyata | k3d (1 control + 2 worker), model 135M yang benar-benar generate token | Uji jalur request end-to-end, failover, observability |
+| Plane KWOK | Node palsu 8x H200 lintas 2 site | Skenario kapasitas & preemption yang butuh skala GPU besar tanpa GPU sungguhan |
 
-| Lapisan | Production (dari checklist resmi) | Lab v2 | Status |
+### Pemetaan ke produksi
+
+| Lapisan | Produksi | Lab | Catatan |
 |---|---|---|---|
-| Model serving | KServe / Triton dashboard (item checklist 27) | KServe InferenceService, RawDeployment mode | Sesuai — nama tool sama persis |
-| Ingress / load balancer | Belum dikonfirmasi; kemungkinan Istio (default KServe) | Traefik (bawaan k3d) | **ASUMSI** — lihat di bawah |
-| Serving engine | vLLM (dikonfirmasi langsung) | llama.cpp, endpoint OpenAI-compatible | **Simplifikasi karena RAM** — image vLLM 4 GB + butuh GPU; permukaan API (`/v1/chat/completions`, `/v1/models`) identik. Alasan lengkap di `serving/runtimes/llamacpp-openai.yaml` |
-| Monitoring | Grafana + Prometheus + Alertmanager (item 30-32) | kube-prometheus-stack | Sesuai |
-| Registry | Harbor + Trivy (item 28-29) | Registry bawaan k3d, tanpa Harbor penuh | Simplifikasi karena constraint RAM |
-| RBAC / tenant | tenant-bootstrap chart (Sprint 1) | Diarsipkan sebagai referensi, bukan jalur utama | Dipertahankan, tidak dihapus |
-| RAG | Milik client, di luar checklist EOS | Tidak disimulasikan | Di luar scope |
-| Notebook / MLflow / Kubeflow | Ada di checklist tapi bukan tanggung jawab EOS | Tidak disimulasikan | Di luar scope (sesuai split fokus 80/20) |
+| Model serving | KServe / Triton | KServe InferenceService, RawDeployment mode | Nama tool sama persis |
+| Ingress | Belum dikonfirmasi, kemungkinan Istio | Traefik (bawaan k3d) | Asumsi — cukup ganti `ingressClassName` kalau ternyata Istio |
+| Serving engine | vLLM | llama.cpp, endpoint OpenAI-compatible | Permukaan API (`/v1/chat/completions`, `/v1/models`) identik; alasan lengkap di `serving/runtimes/llamacpp-openai.yaml` |
+| Monitoring | Grafana + Prometheus + Alertmanager | kube-prometheus-stack | Sesuai |
+| Registry | Harbor + Trivy | Registry bawaan k3d | Disederhanakan karena RAM |
+| RBAC / tenancy | — | `charts/_archive/tenant-bootstrap` | Referensi, bukan jalur utama |
 
-## Kenapa RawDeployment, bukan Serverless (Knative)
+## Struktur repo
 
-KServe defaultnya jalan pakai Knative Serverless — itu yang paling sering muncul di tutorial. Tapi dokumentasi KServe sendiri menyarankan Standard/RawDeployment mode untuk generative inference (LLM), karena beban kerjanya panjang dan GPU-nya mahal — scale-to-zero justru kontraproduktif untuk pola ini. RawDeployment jalan di atas Deployment/Service/HPA biasa, tanpa Knative sama sekali.
+```
+cluster/          config k3d + registry (mode air-gap opsional)
+serving/
+  kserve/         Helm values KServe (RawDeployment)
+  runtimes/       ServingRuntime llama.cpp OpenAI-compatible
+  sites/          InferenceService per site (site-a, site-b)
+observability/
+  values-*.yaml   Helm values kube-prometheus-stack, di-scope untuk 8 GB
+  monitors/       PodMonitor / ServiceMonitor (predictor, Traefik)
+  rules/          PrometheusRule
+  tests/          kasus uji promtool untuk rule di atas
+  grafana/        dashboard sebagai ConfigMap
+sim/              plane KWOK: fake node H200, PriorityClass, skenario preemption
+scripts/          install-tools, preflight, smoke test, unit test rule
+charts/_archive/  chart tenant-bootstrap (referensi RBAC/NetworkPolicy/Helm test)
+latihan/          manifest latihan tenancy mentah
+docs/             catatan hasil dan temuan per topik
+airgap/ capacity/ tempat artifact mirroring image & angka kapasitas
+```
 
-Ini cocok ganda:
+## Workflow
 
-1. Match dengan kenyataan produksi — pod fixed, tanpa autoscaling, persis profil yang direkomendasikan RawDeployment untuk beban generative.
-2. Jauh lebih ringan di laptop 8GB, karena tidak perlu install Knative + Istio penuh.
+### 1. Siapkan host
 
-Ini bukan mengganti arsitektur. API `InferenceService` tetap sama persis, hanya execution mode yang beda. Kalau nanti dikonfirmasi produksi pakai Istio, tinggal ganti `ingressClassName` dari `traefik` ke `istio` di values — tidak perlu re-design.
+```bash
+bash scripts/install-tools.sh     # SKIP_OPTIONAL=1 untuk lewati tooling test
+make preflight                    # cek RAM, docker, tooling
+```
 
-## Asumsi & cara verifikasi
+### 2. Naikkan lab bertahap
 
-Wajib dicek ulang begitu ada akses hands-on. Jangan biarkan lab jadi sumber kebenaran palsu.
+Jangan jalankan semua sekaligus di 8 GB. Naikkan per profil dan cek anggaran memori di
+antaranya dengan `make mem`.
 
-1. **Ingress**: lab pakai Traefik. Verifikasi produksi: `kubectl get ingressclass` dan `kubectl get pods -n istio-system` (kalau ada isinya, berarti Istio).
-2. **Deployment mode KServe**: lab set RawDeployment eksplisit. Verifikasi: `kubectl get inferenceservice -A -o yaml | grep -i deploymentMode`, atau cek `kubectl get pods -A | grep knative` (kalau kosong, kemungkinan besar RawDeployment juga di produksi).
-3. **Load balancing antar site**: sengaja tidak disimulasikan karena belum diketahui mekanismenya (DNS-based, LB terpusat, atau client pilih manual). **Ini tidak menghalangi lab berjalan** — testing di Sprint 2-4 mengakses site-a dan site-b langsung lewat endpoint masing-masing (header `Host`, tanpa DNS), bukan lewat satu LB gabungan. Skenario "site mati" di Sprint 4 dimatikan manual lewat anotasi `serving.kserve.io/stop`, bukan menunggu mekanisme failover otomatis yang belum diketahui bentuknya. Isi bagian ini begitu tahu mekanisme aslinya — nanti tinggal menambah satu layer di depan, bukan mengubah yang sudah dibangun.
-4. **Registry**: lab skip Harbor penuh. Kalau nanti perlu simulasi vulnerability scanning, tambahkan Trivy standalone (ringan) daripada Harbor penuh (butuh Postgres + Redis).
+```bash
+make up-core       # ~1.0 GB — cluster k3d + Traefik + cert-manager + KWOK
+make up-sim        # 2 worker H200 palsu + PriorityClass  (butuh up-core)
+make up-serving    # ~1.6 GB — KServe + 4 InferenceService di 2 site
+make up-obs        # Prometheus + Grafana + Alertmanager + monitor/rule/dashboard
+```
 
-## Yang tetap dipakai dari Sprint 0-1
+### 3. Validasi
 
-- Scaffold k3d, Makefile dengan memory profile, preflight script — dipakai apa adanya
-- Fake GPU nodes (KWOK plane) — dipakai apa adanya, jadi plane simulasi kapasitas
-- Hasil eksperimen preemption (10 putaran, korban selalu 2 pod terbaru per node) — tetap relevan sebagai baseline pembanding skenario failover baru
-- Chart `tenant-bootstrap` — dipindah ke `charts/_archive/tenant-bootstrap/`, tetap ada, bukan lagi dependency sprint berikutnya
+```bash
+make smoke         # request OpenAI-compatible ke 4 endpoint lewat ingress
+make status        # node, GPU allocatable, pod yang tidak Running
+make grafana       # port-forward Grafana ke localhost:3000 (admin / lab)
+```
 
-## Rencana sprint (revisi)
+`make smoke` sengaja lewat ingress Traefik dan bukan port-forward, supaya yang diuji jalur
+yang sama dengan yang dipakai client: Host header → Traefik → Service → pod. Dua hal yang
+dicek per endpoint: identitas model dari `/v1/models`, dan token hasil generate yang benar-benar
+keluar — bukan sekadar HTTP 200.
 
-**Sprint 2 — Serving plane dasar — SELESAI (2026-08-14)**
-- Install KServe (RawDeployment mode) + Traefik IngressClass di plane nyata
-- Deploy 2 InferenceService kecil mewakili "llama-sim" dan "deepseek-sim" — cukup untuk uji jalur request end-to-end, bukan benchmark performa model
-- Duplikasi ke 2 namespace (`site-a`, `site-b`) dengan config identik
-- Validasi: request OpenAI-compatible sampai ke kedua site dan dapat respons
+### 4. Test tanpa cluster
 
-  Bukti jalan, penyimpangan dari rencana, dan tiga temuan yang mengubah Sprint 3-4: **`docs/20-serving-plane.md`**. Reproduksi: `make up-serving && make smoke`.
+Sama persis dengan yang jalan di CI (`.github/workflows/ci.yml`), jadi bisa dijalankan
+sebelum push.
 
-**Sprint 3 — Observability — SELESAI (2026-08-14)**
-- Install kube-prometheus-stack, resource request di-scope biar muat di 8GB
-- Dashboard Grafana minimal: request rate, latency p95, status pod — per site
-- Alert rule dasar: endpoint down, pod restart looping. Catatan dari Sprint 2: **jangan bangun alert "endpoint down" di atas condition `Ready` milik InferenceService** — condition itu jadi `False` selama rolling update normal padahal trafik tidak pernah putus. Ukur dengan request sungguhan, seperti `scripts/smoke-serving.sh`
-- Ini jadi dasar pembanding waktu kamu lihat Grafana kantor beneran
+```bash
+make test          # semuanya sekaligus
+make test-lint     # helm lint semua chart, termasuk yang diarsipkan
+make test-schema   # kubeconform -strict terhadap skema Kubernetes + CRD
+make test-rules    # unit test alert rule via promtool
+```
 
-  Bukti jalan + tiga temuan (yang terpenting: `up == 0` buta terhadap target yang hilang): **`docs/30-observability.md`**. Reproduksi: `make up-obs && make smoke`, lalu `make grafana`.
+`test-rules` tidak memanggil `promtool test rules` langsung: rule disimpan sebagai objek
+`PrometheusRule` yang tidak dimengerti promtool, jadi skripnya mengekstrak `.spec` dulu.
 
-**Sprint 4 — Skenario kapasitas & failover**
-- Load test terkontrol ke plane nyata (k6 atau locust), cari titik antrean mulai numpuk
-- Simulasi "site mati": `kubectl annotate isvc <nama> -n site-a serving.kserve.io/stop=true`, ukur berapa lama site-b menyerap beban. **Jangan pakai `kubectl scale --replicas=0`** — controller KServe mengembalikannya dari `minReplicas` dalam ~8 detik (dibuktikan di Sprint 2, lihat `docs/20-serving-plane.md`)
-- Pakai plane KWOK untuk skenario skala besar (8x H200 penuh) yang tidak muat di laptop
-- Catatan dari Sprint 3: yang mendeteksi site mati adalah `SiteEndpointsAbsent` (berbasis `absent()`), **bukan** `up == 0` — waktu site dimatikan, target scrape-nya hilang dari service discovery dan `up` berhenti ada, bukan menjadi 0. Ukur durasi failover dari alert itu, atau langsung dari `traefik_service_requests_total` per site
-- Output: draft angka kapasitas + runbook failover — bentuk yang sama dipakai di kerjaan asli
+### 5. Bongkar
 
-**Sprint 5 — Model lifecycle**
-- Simulasi rollout versi model baru tanpa downtime (rolling update biasa; RawDeployment tidak dukung canary bawaan Knative)
-- Dokumentasi prosedur rollback
+```bash
+make down          # hapus cluster
+make clean         # rapikan image docker lama
+```
 
-## Instruksi untuk Claude Code
+## Tools yang dipakai
 
-1. Baca struktur repo yang ada (`charts/`, `Makefile`, mapping doc Sprint 0) sebelum mengubah apa pun
-2. Pindahkan `charts/tenant-bootstrap` ke `charts/_archive/tenant-bootstrap/` — jangan dihapus, update referensi CI kalau ada
-3. Konfirmasi Traefik aktif bawaan k3d: `kubectl get pods -n kube-system | grep traefik`
-4. Install KServe di mode RawDeployment (`kserve.controller.deploymentMode=RawDeployment` di Helm values) — jangan install Knative
-5. Buat namespace `site-a` dan `site-b`, masing-masing 2 InferenceService (`llama-sim`, `deepseek-sim`) pakai model HF kecil
-6. Validasi end-to-end: `curl` ke endpoint tiap site, pastikan dapat respons token
-7. Baru lanjut ke Sprint 3 setelah Sprint 2 tervalidasi hijau — tiap sprint butuh bukti jalan (output command atau test lulus) sebelum lanjut ke sprint berikutnya
+### Runtime
+
+| Tool | Peran |
+|---|---|
+| k3d + k3s | Cluster Kubernetes lokal, 1 control + 2 worker |
+| Traefik | IngressClass, bawaan k3d, dipakai InferenceService |
+| cert-manager | Prasyarat webhook KServe |
+| KServe | `InferenceService` mode RawDeployment (tanpa Knative) |
+| llama.cpp | Serving engine, endpoint OpenAI-compatible |
+| KWOK | Node palsu untuk simulasi 8x H200 tanpa GPU |
+| kube-prometheus-stack | Prometheus + Grafana + Alertmanager + operator |
+| Kyverno | Opsional (`make kyverno`), di luar profil default — tidak dipakai skenario serving |
+
+### CLI
+
+| Tool | Peran |
+|---|---|
+| kubectl | Operasi cluster |
+| helm | Install KServe, kube-prometheus-stack, lint chart lokal |
+| docker | Runtime k3d, sekaligus sumber angka `make mem` |
+| kubeconform | Validasi manifest terhadap skema Kubernetes dan CRD |
+| promtool | Unit test alert rule |
+| crane | Mirroring image untuk skenario air-gap |
+| k9s | Melihat siapa yang makan memori — bukan kemewahan di 8 GB |
+| yq / jq | Baca YAML dan respons JSON di skrip |
+
+## Dokumentasi
+
+| Dokumen | Isi |
+|---|---|
+| `docs/00-mapping.md` | Pemetaan komponen lab ke platform produksi |
+| `docs/10-quota-rationale.md` | Dasar angka quota dan hasil eksperimen preemption |
+| `docs/20-serving-plane.md` | Bukti jalan serving plane + temuan perilaku KServe |
+| `docs/30-observability.md` | Bukti jalan observability + temuan soal alert |
+| `docs/runbooks/` | Prosedur operasional |
+| `90-panduan-konsep.md` | Panduan konsep di balik keputusan lab |
